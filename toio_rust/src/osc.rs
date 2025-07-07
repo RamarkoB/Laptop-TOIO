@@ -21,7 +21,7 @@ pub fn handle_events() -> io::Result<bool> {
     Ok(false)
 }
 
-pub fn handle_packet(packet: OscPacket) -> Option<(usize, Command)> {
+pub fn handle_packet(packet: OscPacket, show_terminal: bool) -> Option<(usize, Command)> {
     match packet {
         OscPacket::Message(msg) => {
             let mut vals: Vec<i32> = msg
@@ -84,13 +84,7 @@ pub fn handle_packet(packet: OscPacket) -> Option<(usize, Command)> {
                         })
                         .collect(),
                 }),
-                "/led" => Some(Command::Led {
-                    duration: vals[1] as u8,
-                    red: vals[2] as u8,
-                    green: vals[3] as u8,
-                    blue: vals[4] as u8,
-                }),
-                "/multiLed" => Some(Command::MultiLed {
+                "/led" => Some(Command::MultiLed {
                     repetitions: vals[1] as u8,
                     lights: vals
                         .split_off(2)
@@ -123,8 +117,12 @@ pub fn handle_packet(packet: OscPacket) -> Option<(usize, Command)> {
                 _ => None,
             };
 
+            if show_terminal {
+                println!("Update Received [{}]: {:?}", msg.addr.as_str(), vals,)
+            }
+
             // Return pair of (toioID, pair)
-            return cmd.map(|cmd| (vals[0] as usize, cmd));
+            cmd.map(|cmd| (vals[0] as usize, cmd))
         }
         _ => None,
     }
@@ -219,7 +217,7 @@ pub fn send_packet(
         .unwrap();
 
         if show_terminal {
-            println!("{}: {:?}", addr, args)
+            println!("Update Received [{}]: {:?}", addr, args)
         }
 
         socket.send_to(&msg, to_addr).unwrap();

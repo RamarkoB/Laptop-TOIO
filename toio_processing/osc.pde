@@ -81,10 +81,6 @@ void motorMultiTarget(int cubeId, int control, int timeout, int mode, int maxspe
     for (int j = 0; j < targets[i].length; j++) {
       msg.add(targets[i][j]);
     }
-    
-    if (targets[i].length == 2) {
-      msg.add(0);
-    }
   }
   oscP5.send(msg, server[hostId]);
 }
@@ -114,6 +110,7 @@ void lightLed(int cubeId, int duration, int red, int green, int blue) {
   int actualcubeid = cubeId % cubesPerHost;
   OscMessage msg = new OscMessage("/led");
   msg.add(actualcubeid);
+  msg.add(1);
   msg.add(duration);
   msg.add(red);
   msg.add(green);
@@ -130,13 +127,9 @@ void lightLed(int cubeId, int repetitions, int[][] lights) {
   OscMessage msg = new OscMessage("/led");
   msg.add(actualcubeid);
   msg.add(repetitions);
-  msg.add(lights.length);
 
   for (int i = 0; i < lights.length; i++) {
-    msg.add(lights[i][0]);
-    msg.add(1);
-    msg.add(1);
-     
+    msg.add(lights[i][0]);     
     for (int j = 1; j < lights[i].length; j++) {
        msg.add(lights[i][j]);
     }
@@ -164,6 +157,8 @@ void soundMidi(int cubeId, int duration, int noteID, int volume) {
   int actualcubeid = cubeId % cubesPerHost;
   OscMessage msg = new OscMessage("/midi");
   msg.add(actualcubeid);
+  msg.add(1);
+  
   msg.add(duration);
   msg.add(noteID);
   msg.add(volume);
@@ -179,7 +174,6 @@ void soundMidi(int cubeId, int repetitions, int[][] notes) {
   OscMessage msg = new OscMessage("/midi");
   msg.add(actualcubeid);
   msg.add(repetitions);
-  msg.add(notes.length);
   
   for (int i = 0; i < notes.length; i++) {
     for (int j = 0; j < notes[i].length; j++) {

@@ -99,7 +99,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         // let mut now = SystemTime::now();
         while let Ok(size) = sock.recv(&mut buf) {
             if let Ok((_, packet)) = rosc::decoder::decode_udp(&buf[..size]) {
-                if let Some((toionum, cmd)) = handle_packet(packet) {
+                if let Some((toionum, cmd)) = handle_packet(packet, args.terminal) {
                     let connected_read = connected_clone.read().await;
                     if toionum < connected_read.len() {
                         let toio = connected_read[toionum].read().await;
