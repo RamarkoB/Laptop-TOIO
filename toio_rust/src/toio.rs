@@ -8,7 +8,6 @@ use tokio::sync::mpsc;
 use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::sync::RwLock;
 use tokio::task::JoinHandle;
-use tokio::time::timeout;
 
 use futures::stream::StreamExt;
 
@@ -229,10 +228,8 @@ const IDARR: [&str; 193] = [
     "n2L",           // #192
 ];
 
-/// Format for a target to plug into the MotorTarget varient
-/// of the Command enum. By putting multiple of these into a vector,
-/// you can send a a series of targets for a toio to travel to in
-/// a sequence.
+/// Format for a target to plug into the MotorTarget variant
+/// of the Command enum.
 #[derive(Clone, Debug)]
 pub struct TargetCommand {
     pub x_target: u16,
@@ -240,10 +237,8 @@ pub struct TargetCommand {
     pub theta_target: u16,
 }
 
-/// Format for a RGB color to plug into the MultiLed varient
-/// of the Command enum. By putting multiple of these into a vector,
-/// you can send a a series of colors for a toio to flash on its led
-/// in a sequence.
+/// Format for a RGB color to plug into the MultiLed variant
+/// of the Command enum.
 #[derive(Clone, Debug)]
 pub struct LedCommand {
     pub duration: u8,
@@ -252,10 +247,8 @@ pub struct LedCommand {
     pub green: u8,
 }
 
-/// Format for a MIDI note to plug into the Midi varient
-/// of the Command enum. By putting multiple of these into a vector,
-/// you can send a a series of notes for a toio to play  in
-/// a sequence.
+/// Format for a MIDI note to plug into the Midi variant
+/// of the Command enum.
 #[derive(Clone, Debug)]
 pub struct MidiCommand {
     pub duration: u8,
@@ -342,7 +335,7 @@ pub enum Command {
     },
 }
 
-/// An enum to list out all possible updates to recieve from a toio
+/// An enum to list out all possible updates to receive from a toio
 #[allow(dead_code)]
 #[derive(Debug)]
 pub enum Update {
@@ -429,15 +422,31 @@ pub struct ToioPeripheral {
     pub peripheral_id: platform::PeripheralId,
 }
 
+// Consolidated state struct to reduce lock overhead
+#[derive(Clone)]
+pub struct ToioState {
+    pub battery: Option<u8>,
+    pub last_update: Option<SystemTime>,
+    pub last_command: Option<SystemTime>,
+}
+
+impl ToioState {
+    fn new() -> Self {
+        ToioState {
+            battery: None,
+            last_update: None,
+            last_command: None,
+        }
+    }
+}
+
 pub struct Toio {
     pub toio: ToioPeripheral,
     pub name: String,
     pub id: String,
     pub connected: bool,
     pub channel: Option<JoinHandle<()>>,
-    pub battery: Arc<RwLock<Option<u8>>>,
-    pub last_update: Arc<RwLock<Option<SystemTime>>>,
-    pub last_command: Arc<RwLock<Option<SystemTime>>>,
+    pub state: Arc<RwLock<ToioState>>,
 }
 
 impl Updates {
@@ -455,7 +464,6 @@ impl ToioScanner {
         let manager = Manager::new().await?;
 
         // get the first bluetooth adapter
-        // connect to the adapter
         let central = manager
             .adapters()
             .await
@@ -478,7 +486,6 @@ impl ToioScanner {
         let manager = Manager::new().await?;
 
         // get the first bluetooth adapter
-        // connect to the adapter
         let central = manager
             .adapters()
             .await
@@ -519,7 +526,7 @@ impl ToioScanner {
                         let peripheral = central.peripheral(&id).await.unwrap();
 
                         if ordered {
-                            // if succesful connection and the filter is ordered, update filter
+                            // if filtered order, update filter on successful connection
                             if let Some(ref mut new_filter) = toio_filter.clone() {
                                 if !new_filter.is_empty() {
                                     let curr_toio = new_filter.remove(0);
@@ -544,7 +551,7 @@ impl ToioScanner {
                         let peripheral = central.peripheral(&id).await.unwrap();
 
                         if ordered {
-                            // if succesful connection and the filter is ordered, update filter
+                            // if filtered order, update filter on successful connection
                             if let Some(ref mut new_filter) = toio_filter.clone() {
                                 if !new_filter.is_empty() {
                                     let curr_toio = new_filter.remove(0);
@@ -661,17 +668,11 @@ impl ToioPeripheral {
 
         let mut notification_stream = self.peripheral.notifications().await?;
         tokio::spawn(async move {
-            // let notification_steam = notification_stream;
-
-            while let Ok(possible_event) = timeout(
-                std::time::Duration::from_secs(5),
-                notification_stream.next(),
-            )
-            .await
-            {
-                if let Some(event) = possible_event {
-                    if let Some(update) = ToioPeripheral::get_update(event) {
-                        tx.send(update).await.unwrap();
+            while let Some(event) = notification_stream.next().await {
+                if let Some(update) = ToioPeripheral::get_update(event) {
+                    if tx.send(update).await.is_err() {
+                        // Channel closed, exit gracefully
+                        break;
                     }
                 }
             }
@@ -739,67 +740,6 @@ impl ToioPeripheral {
                     posture: vals[4],
                     shake: vals[5],
                 }),
-                // 0x02 => Some(Update::Magnetic {
-                //     state: vals[1],
-                //     strength: vals[2],
-                //     forcex: vals[3] as i8,
-                //     forcey: vals[4] as i8,
-                //     forcez: vals[5] as i8,
-                // }),
-                // 0x03 => match vals[1] {
-                //     0x01 => Some(Update::PostureEuler {
-                //         roll: vals[2] as u16 | (vals[3] as u16) << 8,
-                //         pitch: vals[4] as u16 | (vals[5] as u16) << 8,
-                //         yaw: vals[5] as u16 | (vals[6] as u16) << 8,
-                //     }),
-                //     0x02 => Some(Update::PostureQuaternion {
-                //         w: 0.0,
-                //         // vals[2] as f32
-                //         //     | (vals[3] as f32) << 8
-                //         //     | (vals[4] as f32) << 16
-                //         //     | (vals[5] as f32) << 24,
-                //         x: 0.0,
-                //         // vals[6] as f32
-                //         //     | (vals[7] as f32) << 8
-                //         //     | (vals[8] as f32) << 16
-                //         //     | (vals[9] as f32) << 24,
-                //         y: 0.0,
-                //         // vals[10] as f32
-                //         //     | (vals[11] as f32) << 8
-                //         //     | (vals[12] as f32) << 16
-                //         //     | (vals[13] as f32) << 24,
-                //         z: 0.0,
-                //         // vals[14] as f32
-                //         //     | (vals[15] as f32) << 8
-                //         //     | (vals[16] as f32) << 16
-                //         //     | (vals[17] as f32) << 24,
-                //     }),
-                //     0x03 => Some(Update::PostureHighPrecisionEuler {
-                //         roll: 0.0,
-                //         // vals[2] as f32
-                //         //     | (vals[3] as f32) << 8
-                //         //     | (vals[4] as f32) << 16
-                //         //     | (vals[5] as f32) << 24,
-                //         pitch: 0.0,
-                //         // vals[6] as f32
-                //         //     | (vals[7] as f32) << 8
-                //         //     | (vals[8] as f32) << 16
-                //         //     | (vals[9] as f32) << 24,
-                //         yaw: 0.0,
-                //         // vals[10] as f32
-                //         //     | (vals[11] as f32) << 8
-                //         //     | (vals[12] as f32) << 16
-                //         //     | (vals[13] as f32) << 24,
-                //     }),
-                //     _ => {
-                //         println!(
-                //             "Unkown {} Update: {:?}",
-                //             uuid_to_string(notification.uuid),
-                //             vals
-                //         );
-                //         None
-                //     }
-                // },
                 _ => {
                     println!(
                         "Unkown {} Update: {:?}",
@@ -847,49 +787,39 @@ impl ToioPeripheral {
         };
 
         let cmd: Vec<u8> = match command {
-            Command::MotionRequest => {
-                vec![0x81]
-            }
-            Command::MagneticRequest => {
-                vec![0x82]
-            }
-            Command::PostureRequest { format } => {
-                vec![0x83, format]
-            }
+            Command::MotionRequest => vec![0x81],
+            Command::MagneticRequest => vec![0x82],
+            Command::PostureRequest { format } => vec![0x83, format],
             Command::MotorControl {
                 left_direction,
                 left_speed,
                 right_direction,
                 right_speed,
-            } => {
-                vec![
-                    0x01,
-                    0x01,
-                    left_direction,
-                    left_speed,
-                    0x02,
-                    right_direction,
-                    right_speed,
-                ]
-            }
+            } => vec![
+                0x01,
+                0x01,
+                left_direction,
+                left_speed,
+                0x02,
+                right_direction,
+                right_speed,
+            ],
             Command::MotorDuration {
                 left_direction,
                 left_speed,
                 right_direction,
                 right_speed,
                 duration,
-            } => {
-                vec![
-                    0x02,
-                    0x01,
-                    left_direction,
-                    left_speed,
-                    0x02,
-                    right_direction,
-                    right_speed,
-                    duration,
-                ]
-            }
+            } => vec![
+                0x02,
+                0x01,
+                left_direction,
+                left_speed,
+                0x02,
+                right_direction,
+                right_speed,
+                duration,
+            ],
             Command::MotorTarget {
                 control,
                 timeout,
@@ -899,23 +829,21 @@ impl ToioPeripheral {
                 x_target,
                 y_target,
                 theta_target,
-            } => {
-                vec![
-                    0x03,
-                    control,
-                    timeout,
-                    move_type,
-                    max_speed,
-                    speed_change,
-                    0x00,
-                    (x_target & 0x00FF) as u8,
-                    ((x_target & 0xFF00) >> 8) as u8,
-                    (y_target & 0x00FF) as u8,
-                    ((y_target & 0xFF00) >> 8) as u8,
-                    (theta_target & 0x00FF) as u8,
-                    ((theta_target & 0xFF00) >> 8) as u8,
-                ]
-            }
+            } => vec![
+                0x03,
+                control,
+                timeout,
+                move_type,
+                max_speed,
+                speed_change,
+                0x00,
+                (x_target & 0x00FF) as u8,
+                ((x_target & 0xFF00) >> 8) as u8,
+                (y_target & 0x00FF) as u8,
+                ((y_target & 0xFF00) >> 8) as u8,
+                (theta_target & 0x00FF) as u8,
+                ((theta_target & 0xFF00) >> 8) as u8,
+            ],
             Command::MultiTarget {
                 control,
                 timeout,
@@ -938,7 +866,6 @@ impl ToioPeripheral {
                 cmd.append(&mut parse_target_command(targets));
                 cmd
             }
-
             Command::MotorAcceleration {
                 velocity,
                 acceleration,
@@ -947,47 +874,33 @@ impl ToioPeripheral {
                 direction,
                 priority,
                 duration,
-            } => {
-                vec![
-                    0x05,
-                    velocity,
-                    acceleration,
-                    (rotational_velocity & 0x00FF) as u8,
-                    ((rotational_velocity & 0xFF00) >> 8) as u8,
-                    rotational_direction,
-                    direction,
-                    priority,
-                    duration,
-                ]
-            }
-            Command::LedOff => {
-                vec![0x01]
-            }
+            } => vec![
+                0x05,
+                velocity,
+                acceleration,
+                (rotational_velocity & 0x00FF) as u8,
+                ((rotational_velocity & 0xFF00) >> 8) as u8,
+                rotational_direction,
+                direction,
+                priority,
+                duration,
+            ],
+            Command::LedOff => vec![0x01],
             Command::Led {
                 duration,
                 red,
                 green,
                 blue,
-            } => {
-                vec![0x03, duration, 0x01, 0x01, red, green, blue]
-            }
+            } => vec![0x03, duration, 0x01, 0x01, red, green, blue],
             Command::MultiLed {
                 repetitions,
                 lights,
             } => parse_led_command(repetitions, lights),
-            Command::SoundOff => {
-                vec![0x01]
-            }
+            Command::SoundOff => vec![0x01],
             Command::Sound {
                 sound_effect,
                 volume,
-            } => {
-                vec![
-                    0x02,         //sound
-                    sound_effect, //sound effect ID
-                    volume,       //volume
-                ]
-            }
+            } => vec![0x02, sound_effect, volume],
             Command::Midi { repetitions, notes } => parse_midi_command(repetitions, notes),
         };
 
@@ -1007,11 +920,10 @@ impl ToioPeripheral {
             properties: response_flag,
         };
 
-        // println!("{} : {:?}", uuid_to_string(uuid), cmd);
-        self.peripheral
+        let _ = self
+            .peripheral
             .write(&characteristic, &cmd, response_type)
-            .await
-            .unwrap();
+            .await;
     }
 }
 
@@ -1026,10 +938,8 @@ impl Toio {
             },
             connected: true,
             channel: None,
-            battery: Arc::new(RwLock::new(None)),
+            state: Arc::new(RwLock::new(ToioState::new())),
             toio,
-            last_update: Arc::new(RwLock::new(None)),
-            last_command: Arc::new(RwLock::new(None)),
         };
     }
 
@@ -1044,24 +954,16 @@ impl Toio {
         self.connected = false;
     }
 
-    pub fn get_battery(&self) -> Arc<RwLock<Option<u8>>> {
-        return self.battery.clone();
-    }
-
-    pub fn get_last_update(&self) -> Arc<RwLock<Option<SystemTime>>> {
-        return self.last_update.clone();
-    }
-
-    pub fn get_last_command(&self) -> Arc<RwLock<Option<SystemTime>>> {
-        return self.last_command.clone();
-    }
-
-    pub async fn is_connected(&self) -> bool {
-        return self.connected;
+    pub fn update_last_command(&self) {
+        let state = self.state.clone();
+        tokio::spawn(async move {
+            let mut state_write = state.write().await;
+            state_write.last_command = Some(SystemTime::now());
+        });
     }
 }
 
-/// matches UUIDs of toios a string of their coresponding service
+/// matches UUIDs of toios a string of their corresponding service
 pub fn uuid_to_string(uuid: Uuid) -> String {
     return match uuid {
         SERVICE => "Service",

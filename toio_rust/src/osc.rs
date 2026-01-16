@@ -1,7 +1,6 @@
 use std::io::{self};
 use std::net::UdpSocket;
-
-use std::vec;
+use std::time::SystemTime;
 
 use rosc::encoder;
 use rosc::{OscMessage, OscPacket, OscType};
@@ -24,10 +23,10 @@ pub fn handle_events() -> io::Result<bool> {
 pub fn handle_packet(packet: OscPacket, show_terminal: bool) -> Option<(usize, Command)> {
     match packet {
         OscPacket::Message(msg) => {
-            let mut vals: Vec<i32> = msg
+            let vals: Vec<i32> = msg
                 .args
                 .iter()
-                .flat_map(|val| match val {
+                .filter_map(|val| match val {
                     OscType::Int(i) => Some(*i),
                     _ => None,
                 })
@@ -74,8 +73,7 @@ pub fn handle_packet(packet: OscPacket, show_terminal: bool) -> Option<(usize, C
                     max_speed: vals[4] as u8,
                     speed_change: vals[5] as u8,
                     op_add: 1,
-                    targets: vals
-                        .split_off(6)
+                    targets: vals[6..]
                         .chunks(3)
                         .map(|target| TargetCommand {
                             x_target: target[0] as u16,
@@ -86,8 +84,7 @@ pub fn handle_packet(packet: OscPacket, show_terminal: bool) -> Option<(usize, C
                 }),
                 "/led" => Some(Command::MultiLed {
                     repetitions: vals[1] as u8,
-                    lights: vals
-                        .split_off(2)
+                    lights: vals[2..]
                         .chunks(4)
                         .map(|light| LedCommand {
                             duration: light[0] as u8,
@@ -103,8 +100,7 @@ pub fn handle_packet(packet: OscPacket, show_terminal: bool) -> Option<(usize, C
                 }),
                 "/midi" => Some(Command::Midi {
                     repetitions: vals[1] as u8,
-                    notes: vals
-                        .split_off(2)
+                    notes: vals[2..]
                         .chunks(3)
                         .map(|note| MidiCommand {
                             duration: note[0] as u8,
@@ -113,15 +109,14 @@ pub fn handle_packet(packet: OscPacket, show_terminal: bool) -> Option<(usize, C
                         })
                         .collect(),
                 }),
-
                 _ => None,
             };
 
             if show_terminal {
-                println!("Update Received [{}]: {:?}", msg.addr.as_str(), vals,)
+                println!("[{:?}] Command Sent: {:?}", SystemTime::now(), cmd);
             }
 
-            // Return pair of (toioID, pair)
+            // Return pair of (toioID, cmd)
             cmd.map(|cmd| (vals[0] as usize, cmd))
         }
         _ => None,
@@ -146,7 +141,7 @@ pub fn send_packet(
             vec![x_center as i32, y_center as i32, theta as i32],
         )),
         Update::Battery { level } => Some(("/battery", vec![level as i32])),
-        Update::Button { pressed } => Some(("/button", vec![if pressed { 0x00 } else { 0x80 }])),
+        Update::Button { pressed } => Some(("/button", vec![if pressed { 0x80 } else { 0x00 }])),
         Update::Motion {
             horizontal,
             collision,
@@ -185,7 +180,6 @@ pub fn send_packet(
             "/PostureQuaternion",
             vec![w as i32, x as i32, y as i32, z as i32],
         )),
-        // Update::PostureHighPrecisionEuler { .. } => todo!(),
         Update::Magnetic {
             state,
             strength,
@@ -206,6 +200,15 @@ pub fn send_packet(
     };
 
     if let Some((addr, args)) = vals {
+        if show_terminal {
+            println!(
+                "[{:?}] Update Received [{}]: {:?}",
+                SystemTime::now(),
+                addr,
+                args
+            )
+        }
+
         let msg = encoder::encode(&OscPacket::Message(OscMessage {
             addr: addr.to_string(),
             args: vec![id as i32]
@@ -216,10 +219,6 @@ pub fn send_packet(
         }))
         .unwrap();
 
-        if show_terminal {
-            println!("Update Received [{}]: {:?}", addr, args)
-        }
-
-        socket.send_to(&msg, to_addr).unwrap();
+        let _ = socket.send_to(&msg, to_addr);
     }
 }

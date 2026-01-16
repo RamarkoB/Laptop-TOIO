@@ -10,13 +10,13 @@ use std::error::Error;
 use std::net::UdpSocket;
 use std::process;
 use std::sync::Arc;
-use std::time::SystemTime;
-use std::vec;
+use std::time::{Duration, SystemTime};
 
 use clap::Parser;
 use futures::future::join_all;
 use futures::future::Either::{Left, Right};
 use tokio::sync::RwLock;
+use tokio::time;
 
 #[derive(Parser)]
 #[command(name = "toio")]
@@ -74,7 +74,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             ToioScanner::new().await?
         }
     };
-    // let scanner = ToioScanner::new_with_filter(true, vec![3, 100]).await?;
+
     let mut toios = scanner.search().await?;
     let connected: Arc<RwLock<Vec<Arc<RwLock<Toio>>>>> = Arc::new(RwLock::new(vec![]));
 
@@ -92,11 +92,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let socket = Arc::new(UdpSocket::bind(&host_addr)?);
     let mut buf = [0u8; rosc::decoder::MTU];
 
-    // whenever a message is recieved through OSC, forward to toio
+    // whenever a message is received through OSC, forward to toio
     let sock = socket.clone();
     let connected_clone = connected.clone();
     tokio::spawn(async move {
-        // let mut now = SystemTime::now();
         while let Ok(size) = sock.recv(&mut buf) {
             if let Ok((_, packet)) = rosc::decoder::decode_udp(&buf[..size]) {
                 if let Some((toionum, cmd)) = handle_packet(packet, args.terminal) {
@@ -104,10 +103,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
                     if toionum < connected_read.len() {
                         let toio = connected_read[toionum].read().await;
 
-                        let last_command = toio.get_last_command();
-                        let mut last_command_write = last_command.write().await;
-                        *last_command_write = Some(SystemTime::now());
+                        // Update last command timestamp
+                        toio.update_last_command();
 
+                        // Forward command to toio
                         toio.toio.send_command(cmd).await;
                     }
                 }
@@ -128,13 +127,12 @@ async fn main() -> Result<(), Box<dyn Error>> {
                     let mut updates = toio_peripheral.updates().await.unwrap();
 
                     // create instance of Toio to record toio info
-                    let mut toio = Toio::new(toio_peripheral);
+                    let toio = Toio::new(toio_peripheral);
                     if args.terminal {
                         println!("Toio Connected: {}", toio.id);
                     }
 
-                    let battery = toio.get_battery();
-                    let last_update = toio.get_last_update();
+                    let state = toio.state.clone();
 
                     // request permission to write to list of connected toios
                     let mut connected_write = connected_clone.write().await;
@@ -144,24 +142,34 @@ async fn main() -> Result<(), Box<dyn Error>> {
                     let toio_channel = tokio::spawn({
                         let to_addr = to_addr.clone();
                         async move {
-                            while let Some(update) = updates.next().await {
-                                // if it is a battery update, record it in the Toio
-                                if let Update::Battery { level } = update {
-                                    let mut battery = battery.write().await;
-                                    *battery = Some(level);
+                            loop {
+                                match updates.next().await {
+                                    Some(update) => {
+                                        // Update state based on update type
+                                        {
+                                            let mut state_write = state.write().await;
+                                            if let Update::Battery { level } = update {
+                                                state_write.battery = Some(level);
+                                            }
+                                            state_write.last_update = Some(SystemTime::now());
+                                        }
+
+                                        send_packet(&sock, &to_addr, id, update, args.terminal);
+                                    }
+                                    None => {
+                                        break; // Stream ended, break out
+                                    }
                                 }
-
-                                // record time of update
-                                let mut last_update = last_update.write().await;
-                                *last_update = Some(SystemTime::now());
-
-                                send_packet(&sock, &to_addr, id, update, args.terminal);
                             }
                         }
                     });
 
-                    toio.add_channel(toio_channel);
-                    connected_write.push(Arc::new(RwLock::new(toio)));
+                    let toio = Arc::new(RwLock::new(toio));
+                    {
+                        let mut toio_write = toio.write().await;
+                        toio_write.add_channel(toio_channel);
+                    }
+                    connected_write.push(toio);
                 }
                 Right(peripheral_id) => {
                     // request permission to write to list of connected toios
@@ -189,7 +197,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         }
     });
 
-    // // start TUI process
+    // start TUI process
     let mut terminal: ToioUI = None;
     if !args.terminal {
         terminal = setup_terminal()?;
@@ -197,7 +205,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     // update UI from all of the toios
     let connected_clone = connected.clone();
+    let mut interval = time::interval(Duration::from_millis(50)); // 20 FPS
     loop {
+        interval.tick().await;
+
         let connected_read = connected_clone.read().await;
 
         // get info from all of the toios
@@ -205,25 +216,22 @@ async fn main() -> Result<(), Box<dyn Error>> {
             let toio = toio_guard.read().await;
             let name = toio.name.clone();
             let id = toio.id.clone();
-            let connected = toio.is_connected().await;
+
+            // Read toio state
+            let state = toio.state.read().await;
+            let connected = toio.connected;
 
             // get battery level
-            let battery_string = if let Some(level) = *toio.battery.read().await {
+            let battery_string = if let Some(level) = state.battery {
                 format!("{}", level)
             } else {
                 "N/A".to_string()
             };
 
             // get time of last update
-            let last_update_string = if let Some(last) = *toio.last_update.read().await {
+            let last_update_string = if let Some(last) = state.last_update {
                 if let Ok(time) = last.elapsed() {
-                    if time.as_millis() < 50 {
-                        "<50ms".to_string()
-                    } else if time.as_secs() < 1 {
-                        format!(">{}ms", time.as_millis() - (time.as_millis() % 100))
-                    } else {
-                        format!("{}s", time.as_secs())
-                    }
+                    format_elapsed_time(time)
                 } else {
                     "N/A".to_string()
                 }
@@ -232,15 +240,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
             };
 
             // get time of last command
-            let last_command_string = if let Some(last) = *toio.last_command.read().await {
+            let last_command_string = if let Some(last) = state.last_command {
                 if let Ok(time) = last.elapsed() {
-                    if time.as_millis() < 50 {
-                        "<50ms".to_string()
-                    } else if time.as_secs() < 1 {
-                        format!(">{}ms", time.as_millis() - (time.as_millis() % 100))
-                    } else {
-                        format!("{}s", time.as_secs())
-                    }
+                    format_elapsed_time(time)
                 } else {
                     "N/A".to_string()
                 }
@@ -259,15 +261,26 @@ async fn main() -> Result<(), Box<dyn Error>> {
         }))
         .await;
 
-        //  update UI
+        // update UI
         if let Some(ref mut toio_ui) = terminal {
             toio_ui.draw(ui(toio_info, args.axlab_id.clone()))?;
         }
 
-        // // exit terminal if "Q" key is pressed
+        // exit terminal if "Q" key is pressed
         if handle_events()? {
             exit_terminal()?;
             process::exit(0);
         }
+    }
+}
+
+// Helper function to format elapsed time
+fn format_elapsed_time(time: Duration) -> String {
+    if time.as_millis() < 50 {
+        "<50ms".to_string()
+    } else if time.as_secs() < 1 {
+        format!(">{}ms", time.as_millis() - (time.as_millis() % 100))
+    } else {
+        format!("{}s", time.as_secs())
     }
 }

@@ -1,6 +1,5 @@
 use std::error::Error;
 use std::io::stdout;
-use std::vec;
 
 use crossterm::{
     cursor::Show,
